@@ -127,6 +127,10 @@ jobs:
             fi
             echo "::group::build ${c}"
             echo "[disk] $(df -h / | awk 'NR==2{print $4" free"}')"
+            # ★USE_PREBUILT_CORES=no★:告诉主仓库的 package.mk「本仓库要从源码编,别走下载覆写」。
+            # 否则会变成「预编译仓库跑这个包时又去下载自己」的循环,工具链一变就永远产不出新 .so
+            # (2026-07-16 被 mame 上传成 9-byte "Not Found" 坐实)。
+            USE_PREBUILT_CORES=no \
             PROJECT=${{ env.PROJECT }} DEVICE=${{ env.DEVICE }} SUBDEVICE=${{ env.SUBDEVICE }} \
             ARCH=${{ env.ARCH }} DISTRO=${{ env.DISTRO }} \
               ./scripts/build "${c}:target" 2>&1 | tee "../build-${c}.log"
