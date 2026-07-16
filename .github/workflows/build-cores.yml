@@ -1,10 +1,16 @@
-name: Build MAME cores
+name: Build prebuilt cores
+
+# 预编译 X98mini 15 平台的 libretro 核心(.so)+ DC/PSP 独立模拟器 + RetroArch(tarball),
+# 发一个 Release;主建置 w2xg2022/EmuELEC 的 package.mk 直接下载,免在主建置里重编这些重核心。
+# ★并行★:matrix 把核心分成多组,一次触发 N 个 job 同时编(每个 job 各自编工具链~1h,
+#   故 wall-clock ≈ 1h + 最重单核心(MAME ~45m) ≈ 2h;比顺序编 4-5h 快很多。
+# ⚠️ ABI 耦合:主建置抓 releases/latest,工具链/glibc 一变就要重跑本 workflow。
 
 on:
   workflow_dispatch:
     inputs:
       emuelec_ref:
-        description: 'w2xg2022/EmuELEC的commit/branch/tag(留空用main最新)'
+        description: 'w2xg2022/EmuELEC 的 commit/branch/tag(留空用 main 最新)'
         required: false
         default: 'main'
 
@@ -17,16 +23,52 @@ env:
   SUBDEVICE: X98mini
   ARCH: aarch64
   DISTRO: EmuELEC
+  STANDALONE_PKGS: "flycastsa PPSSPPSDL retroarch"
 
 jobs:
-  build:
+  prepare:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    outputs:
+      sha: ${{ steps.p.outputs.sha }}
+    steps:
+      - id: p
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.emuelec_ref }}" \
+            https://github.com/w2xg2022/EmuELEC.git s
+          SHA=$(cd s && git rev-parse --short HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          gh release view "cores-$SHA" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create "cores-$SHA" --repo "${{ github.repository }}" \
+              --title "Prebuilt cores (EmuELEC@$SHA)" \
+              --notes "并行预编译中… 对应 w2xg2022/EmuELEC@$SHA 的工具链ABI。"
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: mame2003plus
+            cores: "mame2003-plus"
+          - group: mame2010
+            cores: "mame2010"
+          - group: ra-psp
+            cores: "retroarch PPSSPPSDL"
+          - group: dc-psp-lr
+            cores: "flycastsa ppsspp flycast"
+          - group: mid
+            cores: "parallel-n64 fbneo pcsx_rearmed yabause"
+          - group: light
+            cores: "nestopia snes9x genesis-plus-gx mgba dosbox-pure applewin beetle-pce"
     steps:
       - name: Maximize build space
         uses: easimon/maximize-build-space@v10
         with:
-          root-reserve-mb: 1024
+          root-reserve-mb: 8192
           swap-size-mb: 512
           remove-dotnet: 'true'
           remove-android: 'true'
@@ -38,7 +80,6 @@ jobs:
         run: |
           git clone --depth 1 --branch "${{ github.event.inputs.emuelec_ref }}" \
             https://github.com/w2xg2022/EmuELEC.git emuelec-src
-          echo "EMUELEC_SHA=$(cd emuelec-src && git rev-parse --short HEAD)" >> "$GITHUB_ENV"
 
       - name: Install build dependencies
         run: |
@@ -52,37 +93,58 @@ jobs:
             libvpx-dev rdfind tzdata xfonts-utils lzop \
             libparse-yapp-perl gperf libxml-parser-perl patchutils
 
-      - name: Build mame2003-plus + mame2010 (toolchain自动作为依赖编译)
+      - name: Build group [${{ matrix.group }}] cores (target)
         working-directory: emuelec-src
         run: |
-          set -o pipefail
-          PROJECT=${{ env.PROJECT }} DEVICE=${{ env.DEVICE }} SUBDEVICE=${{ env.SUBDEVICE }} \
-          ARCH=${{ env.ARCH }} DISTRO=${{ env.DISTRO }} \
-            ./scripts/build mame2003-plus:target 2>&1 | tee ../build-mame2003-plus.log
-          PROJECT=${{ env.PROJECT }} DEVICE=${{ env.DEVICE }} SUBDEVICE=${{ env.SUBDEVICE }} \
-          ARCH=${{ env.ARCH }} DISTRO=${{ env.DISTRO }} \
-            ./scripts/build mame2010:target 2>&1 | tee ../build-mame2010.log
+          set +e
+          FAILED=""
+          for c in ${{ matrix.cores }}; do
+            echo "::group::build ${c}"
+            PROJECT=${{ env.PROJECT }} DEVICE=${{ env.DEVICE }} SUBDEVICE=${{ env.SUBDEVICE }} \
+            ARCH=${{ env.ARCH }} DISTRO=${{ env.DISTRO }} \
+              ./scripts/build "${c}:target" 2>&1 | tee "../build-${c}.log"
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            [ "$rc" -ne 0 ] && FAILED="${FAILED} ${c}" && echo "::error::${c} 编译失败(rc=${rc})"
+          done
+          [ -n "$FAILED" ] && echo "本组失败:${FAILED}"
 
-      - name: 收集.so产物
+      - name: 收集本组产物(libretro .so / standalone tarball)
         run: |
           mkdir -p out
-          find emuelec-src -iname 'mame2003_plus_libretro.so' -exec cp -v {} out/ \;
-          find emuelec-src -iname 'mame2010_libretro.so' -exec cp -v {} out/ \;
-          ls -la out/
+          BD=$(ls -d emuelec-src/build.*/ 2>/dev/null | head -1)
+          for c in ${{ matrix.cores }}; do
+            case " ${STANDALONE_PKGS} " in
+              *" ${c} "*)
+                d=$(ls -d "${BD}install_pkg/${c}-"* 2>/dev/null | head -1)
+                if [ -n "$d" ] && [ -d "$d" ]; then
+                  tar -I 'zstd -19 -T0' -cf "out/${c}.tar.zst" -C "$d" .
+                  echo "packed ${c} -> ${c}.tar.zst ($(du -h out/${c}.tar.zst|cut -f1))"
+                else echo "::warning::standalone ${c} 无 install_pkg 产物"; fi
+                ;;
+              *)
+                find "${BD}install_pkg/${c}-"* -name '*_libretro.so' -exec cp -v {} out/ \; 2>/dev/null \
+                  || echo "::warning::libretro ${c} 无 .so 产物"
+                ;;
+            esac
+          done
+          echo "=== 本组产物 ==="; ls -lah out/
+          [ -z "$(ls out/ 2>/dev/null)" ] && { echo "::error::本组无任何产物"; exit 1; }
+          exit 0
 
       - name: Upload build logs (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs
-          path: build-mame*.log
+          name: build-logs-${{ matrix.group }}
+          path: build-*.log
           retention-days: 14
 
-      - name: Create release
+      - name: 上传本组产物到 Release
         if: success()
-        run: |
-          gh release create "cores-${EMUELEC_SHA}" out/*.so \
-            --title "MAME cores (built against EmuELEC@${EMUELEC_SHA})" \
-            --notes "预编译mame2003-plus/mame2010的libretro核心.so,对应w2xg2022/EmuELEC commit ${EMUELEC_SHA}的工具链ABI。"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "cores-${{ needs.prepare.outputs.sha }}" out/* \
+            --repo "${{ github.repository }}" --clobber
+          echo "已上传 [${{ matrix.group }}] 的产物"
