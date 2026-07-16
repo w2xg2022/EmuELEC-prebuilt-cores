@@ -14,6 +14,11 @@ on:
         description: 'w2xg2022/EmuELEC 的 commit/branch/tag(留空用 main 最新)'
         required: false
         default: 'main'
+      force:
+        description: '强制重编(即使产物已在 Release 里也重新编;用于工具链/glibc 变更但 commit 短hash碰巧相同的极端情况)'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -102,8 +107,23 @@ jobs:
           GHREPO: ${{ github.repository }}
         run: |
           set +e
-          OK=""; FAIL=""
+          OK=""; FAIL=""; SKIP=""
+          # 核心 -> 产物文件名(默认 pkgname 的 - 换 _ 加 _libretro.so;少数例外单列)
+          artifact_name() {
+            case "$1" in
+              beetle-pce) echo "mednafen_pce_fast_libretro.so" ;;
+              flycastsa|PPSSPPSDL|retroarch) echo "$1.tar.zst" ;;
+              *) echo "$(echo "$1" | tr - _)_libretro.so" ;;
+            esac
+          }
+          # ★commit 未变则不重编★:此 commit(=此 release tag)已有的产物就跳过,只补缺的。
+          EXISTING=$(gh release view "$TAG" --repo "$GHREPO" --json assets --jq '.assets[].name' 2>/dev/null)
           for c in ${{ matrix.cores }}; do
+            AN=$(artifact_name "$c")
+            if [ "${{ github.event.inputs.force }}" != "true" ] && echo "$EXISTING" | grep -qxF "$AN"; then
+              echo "⏭️ ${c}: 产物 ${AN} 已在 Release cores-<此commit> → 跳过(commit 没变、已编过)"
+              SKIP="${SKIP} ${c}"; continue
+            fi
             echo "::group::build ${c}"
             echo "[disk] $(df -h / | awk 'NR==2{print $4" free"}')"
             PROJECT=${{ env.PROJECT }} DEVICE=${{ env.DEVICE }} SUBDEVICE=${{ env.SUBDEVICE }} \
@@ -135,6 +155,7 @@ jobs:
             rm -rf "${BD}build/${c}-"* /tmp/${c}.tar.zst 2>/dev/null
           done
           echo "==== 组[${{ matrix.group }}] 成功:${OK:-无} ===="
+          echo "==== 组[${{ matrix.group }}] 跳过(commit未变已存在):${SKIP:-无} ===="
           echo "==== 组[${{ matrix.group }}] 失败:${FAIL:-无} ===="
 
       - name: Upload build logs (always)
