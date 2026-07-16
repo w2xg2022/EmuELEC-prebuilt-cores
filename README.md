@@ -11,7 +11,7 @@
 - 主建置**完整编译**时间：约 7–8h（跨接力 session）→ 核心固化后可大幅缩短。
 - 主建置**增量**：约 30–60min。
 
-## 包含哪些核心（X98mini 15 平台角度）
+## 包含哪些核心
 
 ### libretro 核心（单文件 `<name>_libretro.so`）
 `mame2003-plus` `mame2010` `nestopia` `snes9x` `genesis-plus-gx` `mgba` `pcsx_rearmed` `fbneo` `dosbox-pure` `applewin` `parallel-n64` `yabause` `beetle-pce`(mednafen_pce_fast) `ppsspp` `flycast`
