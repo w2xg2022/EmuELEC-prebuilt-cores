@@ -2,7 +2,7 @@
 
 预编译 [w2xg2022/EmuELEC](https://github.com/w2xg2022/EmuELEC) 的重量级模拟器核心，供主建置**直接下载安装**，避免在主建置（尤其云端 CI）里重新编译这些核心，节省建置时间与磁盘。
 
-> 本仓库前身为 `EmuELEC-MAME`（旧名只预编 MAME）。现已扩展到 X98mini 15 平台的整套核心，故改名。旧 URL 由 GitHub 自动转址，不会失效。
+> 本仓库前身为 `EmuELEC-MAME`（旧名只预编 MAME）。现已扩展到 15 平台的整套核心，故改名。旧 URL 由 GitHub 自动转址，不会失效。
 
 ## 为什么需要这个仓库
 
