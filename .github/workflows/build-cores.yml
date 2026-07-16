@@ -2,8 +2,9 @@ name: Build prebuilt cores
 
 # 预编译 X98mini 15 平台的 libretro 核心(.so)+ DC/PSP 独立模拟器 + RetroArch(tarball),
 # 发一个 Release;主建置 w2xg2022/EmuELEC 的 package.mk 直接下载,免在主建置里重编这些重核心。
-# ★并行★:matrix 把核心分成多组,一次触发 N 个 job 同时编(每个 job 各自编工具链~1h,
-#   故 wall-clock ≈ 1h + 最重单核心(MAME ~45m) ≈ 2h;比顺序编 4-5h 快很多。
+# ★并行★:matrix 分组,一次触发 N 个 job 同时编。
+# ★健壮★:每编好一个核心「立刻上传」再编下一个(不等全组编完),并清该核心 build/ 腾空间;
+#   故 job 即使中途被砍(磁盘/时间),已编好的核心也已经在 Release 里,不会前功尽弃。
 # ⚠️ ABI 耦合:主建置抓 releases/latest,工具链/glibc 一变就要重跑本 workflow。
 
 on:
@@ -68,7 +69,7 @@ jobs:
       - name: Maximize build space
         uses: easimon/maximize-build-space@v10
         with:
-          root-reserve-mb: 8192
+          root-reserve-mb: 1024
           swap-size-mb: 512
           remove-dotnet: 'true'
           remove-android: 'true'
@@ -93,44 +94,48 @@ jobs:
             libvpx-dev rdfind tzdata xfonts-utils lzop \
             libparse-yapp-perl gperf libxml-parser-perl patchutils
 
-      - name: Build group [${{ matrix.group }}] cores (target)
+      - name: Build+upload group [${{ matrix.group }}](逐核心,编好即传)
         working-directory: emuelec-src
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: cores-${{ needs.prepare.outputs.sha }}
+          GHREPO: ${{ github.repository }}
         run: |
           set +e
-          FAILED=""
+          OK=""; FAIL=""
           for c in ${{ matrix.cores }}; do
             echo "::group::build ${c}"
+            echo "[disk] $(df -h / | awk 'NR==2{print $4" free"}')"
             PROJECT=${{ env.PROJECT }} DEVICE=${{ env.DEVICE }} SUBDEVICE=${{ env.SUBDEVICE }} \
             ARCH=${{ env.ARCH }} DISTRO=${{ env.DISTRO }} \
               ./scripts/build "${c}:target" 2>&1 | tee "../build-${c}.log"
             rc=${PIPESTATUS[0]}
             echo "::endgroup::"
-            [ "$rc" -ne 0 ] && FAILED="${FAILED} ${c}" && echo "::error::${c} 编译失败(rc=${rc})"
-          done
-          [ -n "$FAILED" ] && echo "本组失败:${FAILED}"
-
-      - name: 收集本组产物(libretro .so / standalone tarball)
-        run: |
-          mkdir -p out
-          BD=$(ls -d emuelec-src/build.*/ 2>/dev/null | head -1)
-          for c in ${{ matrix.cores }}; do
+            BD=$(ls -d build.*/ 2>/dev/null | head -1)
+            ART=""
             case " ${STANDALONE_PKGS} " in
               *" ${c} "*)
                 d=$(ls -d "${BD}install_pkg/${c}-"* 2>/dev/null | head -1)
                 if [ -n "$d" ] && [ -d "$d" ]; then
-                  tar -I 'zstd -19 -T0' -cf "out/${c}.tar.zst" -C "$d" .
-                  echo "packed ${c} -> ${c}.tar.zst ($(du -h out/${c}.tar.zst|cut -f1))"
-                else echo "::warning::standalone ${c} 无 install_pkg 产物"; fi
-                ;;
+                  tar -I 'zstd -19 -T0' -cf "/tmp/${c}.tar.zst" -C "$d" . && ART="/tmp/${c}.tar.zst"
+                fi ;;
               *)
-                find "${BD}install_pkg/${c}-"* -name '*_libretro.so' -exec cp -v {} out/ \; 2>/dev/null \
-                  || echo "::warning::libretro ${c} 无 .so 产物"
-                ;;
+                ART=$(find "${BD}install_pkg/${c}-"* -name '*_libretro.so' 2>/dev/null | head -1) ;;
             esac
+            if [ -n "$ART" ] && [ -e "$ART" ]; then
+              if gh release upload "$TAG" "$ART" --repo "$GHREPO" --clobber; then
+                OK="${OK} ${c}"; echo "✅ 已上传 ${c} ($(basename "$ART"))"
+              else
+                FAIL="${FAIL} ${c}(上传失败)"
+              fi
+            else
+              FAIL="${FAIL} ${c}(rc=${rc}无产物)"; echo "::warning::${c} 无产物(rc=${rc})"
+            fi
+            # 清掉该核心的 build/ 编译暂存腾空间(install_pkg已保留、产物已上传)
+            rm -rf "${BD}build/${c}-"* /tmp/${c}.tar.zst 2>/dev/null
           done
-          echo "=== 本组产物 ==="; ls -lah out/
-          [ -z "$(ls out/ 2>/dev/null)" ] && { echo "::error::本组无任何产物"; exit 1; }
-          exit 0
+          echo "==== 组[${{ matrix.group }}] 成功:${OK:-无} ===="
+          echo "==== 组[${{ matrix.group }}] 失败:${FAIL:-无} ===="
 
       - name: Upload build logs (always)
         if: always()
@@ -139,12 +144,3 @@ jobs:
           name: build-logs-${{ matrix.group }}
           path: build-*.log
           retention-days: 14
-
-      - name: 上传本组产物到 Release
-        if: success()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "cores-${{ needs.prepare.outputs.sha }}" out/* \
-            --repo "${{ github.repository }}" --clobber
-          echo "已上传 [${{ matrix.group }}] 的产物"
