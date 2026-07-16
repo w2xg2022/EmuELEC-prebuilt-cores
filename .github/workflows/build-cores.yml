@@ -29,7 +29,7 @@ env:
   SUBDEVICE: X98mini
   ARCH: aarch64
   DISTRO: EmuELEC
-  STANDALONE_PKGS: "flycastsa PPSSPPSDL retroarch"
+  STANDALONE_PKGS: "flycastsa PPSSPPSDL retroarch yabasanshiroSA_1_5"
 
 jobs:
   prepare:
@@ -65,9 +65,9 @@ jobs:
           - group: ra-psp
             cores: "retroarch PPSSPPSDL"
           - group: dc-psp-lr
-            cores: "flycastsa ppsspp flycast"
+            cores: "flycastsa ppsspp flycast yabasanshiroSA_1_5"
           - group: mid
-            cores: "parallel-n64 fbneo pcsx_rearmed yabause"
+            cores: "mupen64plus-nx fbneo pcsx_rearmed"
           - group: light
             cores: "nestopia snes9x genesis-plus-gx mgba dosbox-pure applewin beetle-pce"
     steps:
@@ -110,9 +110,10 @@ jobs:
           OK=""; FAIL=""; SKIP=""
           # 核心 -> 产物文件名(默认 pkgname 的 - 换 _ 加 _libretro.so;少数例外单列)
           artifact_name() {
+            case " ${STANDALONE_PKGS} " in *" $1 "*) echo "$1.tar.zst"; return;; esac
             case "$1" in
               beetle-pce) echo "mednafen_pce_fast_libretro.so" ;;
-              flycastsa|PPSSPPSDL|retroarch) echo "$1.tar.zst" ;;
+              mupen64plus-nx) echo "mupen64plus_next_libretro.so" ;;
               *) echo "$(echo "$1" | tr - _)_libretro.so" ;;
             esac
           }
