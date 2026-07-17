@@ -19,6 +19,10 @@ on:
         type: boolean
         required: false
         default: false
+      only_groups:
+        description: '只跑指定的组(空格分隔,留空=全跑)。可选:mame2003plus mame2010 ra-psp dc-psp-lr mid light'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -36,7 +40,32 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       sha: ${{ steps.p.outputs.sha }}
+      matrix: ${{ steps.m.outputs.matrix }}
     steps:
+      # NOTE(w2xg2022): matrix 由这里动态产生,好支援 only_groups 过滤。
+      # (GitHub Actions 的 job 层级 if 取不到 matrix context,所以不能用 if 跳过某组;
+      #  正解就是在 prepare 里先把 matrix 过滤好再喂给 build job。)
+      - id: m
+        run: |
+          ALL='[
+            {"group":"mame2003plus","cores":"mame2003-plus"},
+            {"group":"mame2010","cores":"mame2010"},
+            {"group":"ra-psp","cores":"retroarch PPSSPPSDL"},
+            {"group":"dc-psp-lr","cores":"flycastsa ppsspp flycast yabasanshiroSA_1_5"},
+            {"group":"mid","cores":"mupen64plus-nx fbneo pcsx_rearmed"},
+            {"group":"light","cores":"nestopia snes9x genesis-plus-gx mgba dosbox-pure applewin beetle-pce"}
+          ]'
+          ONLY="${{ github.event.inputs.only_groups }}"
+          if [ -z "$ONLY" ]; then
+            M=$(echo "$ALL" | jq -c .)
+            echo "only_groups 留空 → 全部组都跑"
+          else
+            M=$(echo "$ALL" | jq -c --arg only "$ONLY" '[.[] | select(($only | split(" ")) | index(.group))]')
+            [ "$(echo "$M" | jq 'length')" -eq 0 ] && { echo "::error::only_groups='${ONLY}' 没匹配到任何组(可选:mame2003plus mame2010 ra-psp dc-psp-lr mid light)"; exit 1; }
+          fi
+          echo "matrix=$M" >> "$GITHUB_OUTPUT"
+          echo "本轮要跑的组: $(echo "$M" | jq -r '.[].group' | tr '\n' ' ')"
+
       - id: p
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -61,20 +90,9 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
+      # 组定义在 prepare 的 step m(动态产生,支援 only_groups 过滤)
       matrix:
-        include:
-          - group: mame2003plus
-            cores: "mame2003-plus"
-          - group: mame2010
-            cores: "mame2010"
-          - group: ra-psp
-            cores: "retroarch PPSSPPSDL"
-          - group: dc-psp-lr
-            cores: "flycastsa ppsspp flycast yabasanshiroSA_1_5"
-          - group: mid
-            cores: "mupen64plus-nx fbneo pcsx_rearmed"
-          - group: light
-            cores: "nestopia snes9x genesis-plus-gx mgba dosbox-pure applewin beetle-pce"
+        include: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
       - name: Maximize build space
         uses: easimon/maximize-build-space@v10
