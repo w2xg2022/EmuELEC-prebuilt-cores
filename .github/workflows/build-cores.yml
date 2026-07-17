@@ -45,10 +45,15 @@ jobs:
             https://github.com/w2xg2022/EmuELEC.git s
           SHA=$(cd s && git rev-parse --short HEAD)
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          # ★必须建成 prerelease★:主建置的 package.mk 抓 releases/latest。若这里建一个「空的」
+          # 普通 release,它立刻变成 latest → 主建置 curl -f 抓不到核心 → 404 直接失败,而且要
+          # 等本轮编完(~2h)才填满;万一部分核心编失败就永久缺、主建置永久坏。
+          # 所以先建 prerelease(不抢 latest,主建置继续用上一个完整 release),
+          # 等 finalize job 核对 18 个产物齐全后才转正。
           gh release view "cores-$SHA" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
-            gh release create "cores-$SHA" --repo "${{ github.repository }}" \
+            gh release create "cores-$SHA" --repo "${{ github.repository }}" --prerelease \
               --title "Prebuilt cores (EmuELEC@$SHA)" \
-              --notes "并行预编译中… 对应 w2xg2022/EmuELEC@$SHA 的工具链ABI。"
+              --notes "并行预编译中…(产物齐全前保持 prerelease,不抢 releases/latest)对应 w2xg2022/EmuELEC@$SHA 的工具链ABI。"
 
   build:
     needs: prepare
@@ -170,3 +175,36 @@ jobs:
           name: build-logs-${{ matrix.group }}
           path: build-*.log
           retention-days: 14
+
+  # ★保险:产物齐全才转正★
+  # 全部 build job 跑完后核对 18 个产物在不在。齐了 → --prerelease=false --latest 正式接班;
+  # 不齐 → 保持 prerelease,releases/latest 继续指向上一个「完整」的 release,主建置永远不会
+  # 因为抓到半成品而 404 挂掉。补齐做法:重跑本 workflow(闸门会跳过已有的,只补缺的)。
+  finalize:
+    needs: [prepare, build]
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 核对产物齐全才转正为 latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: cores-${{ needs.prepare.outputs.sha }}
+        run: |
+          EXPECTED="mame2003_plus_libretro.so mame2010_libretro.so nestopia_libretro.so
+            snes9x_libretro.so genesis_plus_gx_libretro.so mgba_libretro.so pcsx_rearmed_libretro.so
+            fbneo_libretro.so dosbox_pure_libretro.so applewin_libretro.so mupen64plus_next_libretro.so
+            mednafen_pce_fast_libretro.so ppsspp_libretro.so flycast_libretro.so
+            flycastsa.tar.zst PPSSPPSDL.tar.zst retroarch.tar.zst yabasanshiroSA_1_5.tar.zst"
+          HAVE=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' 2>/dev/null)
+          echo "=== 本轮 Release ($TAG) 现有产物 ==="; echo "$HAVE" | sed 's/^/  /'
+          MISS=""
+          for a in ${EXPECTED}; do echo "$HAVE" | grep -qxF "$a" || MISS="${MISS} ${a}"; done
+          if [ -n "$MISS" ]; then
+            echo "::error::产物不齐,缺:${MISS}"
+            echo "→ 保持 prerelease;releases/latest 仍指向上一个完整 release,主建置不受影响。"
+            echo "→ 补齐:重跑本 workflow(闸门会跳过已有的、只补缺的),或看对应 build-logs-* 查错。"
+            exit 1
+          fi
+          echo "✅ 18 个产物齐全 → 转正为 latest"
+          gh release edit "$TAG" --repo "${{ github.repository }}" --prerelease=false --latest \
+            --notes "预编译核心齐全:14 个 libretro .so + 4 个 standalone tar.zst(flycastsa/PPSSPPSDL/retroarch/yabasanshiroSA_1_5)。全部从源码编译(USE_PREBUILT_CORES=no)。对应 w2xg2022/EmuELEC@${{ needs.prepare.outputs.sha }} 的工具链 ABI。"
