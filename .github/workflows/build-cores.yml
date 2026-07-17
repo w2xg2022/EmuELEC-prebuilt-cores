@@ -60,7 +60,10 @@ jobs:
             M=$(echo "$ALL" | jq -c .)
             echo "only_groups 留空 → 全部组都跑"
           else
-            M=$(echo "$ALL" | jq -c --arg only "$ONLY" '[.[] | select(($only | split(" ")) | index(.group))]')
+            # NOTE(w2xg2022): 必须先 `.group as $g` 绑定再进管线 —— 若写成
+            # select(($only|split(" "))|index(.group)),管线后 `.` 已变成 split 出来的数组,
+            # .group 就会「Cannot index array with string "group"」。
+            M=$(echo "$ALL" | jq -c --arg only "$ONLY" '[.[] | select(.group as $g | ($only | split(" ")) | index($g))]')
             [ "$(echo "$M" | jq 'length')" -eq 0 ] && { echo "::error::only_groups='${ONLY}' 没匹配到任何组(可选:mame2003plus mame2010 ra-psp dc-psp-lr mid light)"; exit 1; }
           fi
           echo "matrix=$M" >> "$GITHUB_OUTPUT"
